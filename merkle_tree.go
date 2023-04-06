@@ -14,6 +14,7 @@ import (
 type MerkleTree struct {
 	branches [][][]byte
 	depth    uint64
+	index    *IndexCache
 }
 
 func GenerateTreeFromItems(items [][]byte) (*MerkleTree, error) {
@@ -49,21 +50,51 @@ func GenerateTreeFromHashedItems(items [][]byte) (*MerkleTree, error) {
 		leaves = append(leaves, leaves[len(leaves)-2], leaves[len(leaves)-1])
 	}
 
+	index, err := NewIndexCache()
+	if nil != err {
+		err = fmt.Errorf("NewIndexCache %v", err)
+		return nil, err
+	}
+	for i, val := range leaves {
+		err = index.SetBytes2Uint64(val, uint64(i))
+		if nil != err {
+			err = fmt.Errorf("SetBytes2Uint64 %v", err)
+			return nil, err
+		}
+	}
+
 	depth := uint64(math.Log2(float64(len(leaves)) + 1))
 	layers := make([][][]byte, depth+1)
 	layers[0] = leaves
 	for i := uint64(0); i < depth; i++ {
-		var updatedValues [][]byte
+		// var updatedValues [][]byte
+		updatedValues := make([][]byte, len(layers[i])/2)
 		for j := 0; j < len(layers[i]); j += 2 {
 			concat := SortAndHash(layers[i][j], layers[i][j+1])
-			updatedValues = append(updatedValues, concat[:])
+			// updatedValues = append(updatedValues, concat[:])
+			updatedValues[j/2] = concat[:]
+
+			has, err := index.Has(concat)
+			if nil != err {
+				err = fmt.Errorf("Has %v", err)
+				return nil, err
+			}
+			if !has {
+				err = index.SetBytes2Uint64(concat, uint64(j/2))
+				if nil != err {
+					err = fmt.Errorf("SetBytes2Uint64 %v", err)
+					return nil, err
+				}
+			}
 		}
+
 		layers[i+1] = updatedValues
 	}
 
 	return &MerkleTree{
 		branches: layers,
 		depth:    depth,
+		index:    index,
 	}, nil
 }
 
@@ -82,7 +113,7 @@ func (m *MerkleTree) MerkleProof(leaf []byte) ([][]byte, error) {
 	nextLeaf := leaf
 	proof := make([][]byte, m.depth)
 	for i := uint64(0); i < m.depth; i++ {
-		leftLeaf, rightLeaf, err := leafPair(m.branches[i], nextLeaf)
+		leftLeaf, rightLeaf, err := leafPairIndex(m.branches[i], nextLeaf, m.index)
 		if err != nil {
 			return nil, fmt.Errorf("could not find pair: %v", err)
 		}
@@ -130,6 +161,25 @@ func leafPair(leaves [][]byte, leaf []byte) ([]byte, []byte, error) {
 	if !found {
 		return nil, nil, fmt.Errorf("could not find leaf %#x", leaf)
 	}
+
+	var otherLeaf []byte
+	// Chcek if the leaf is on the left side.
+	if indexOfLeaf%2 == 0 {
+		otherLeaf = safeCopyBytes(leaves[indexOfLeaf+1])
+	} else {
+		otherLeaf = safeCopyBytes(leaves[indexOfLeaf-1])
+	}
+	leftLeaf, rightLeaf := Sort2Bytes(leaf, otherLeaf)
+
+	return leftLeaf, rightLeaf, nil
+}
+
+func leafPairIndex(leaves [][]byte, leaf []byte, index *IndexCache) ([]byte, []byte, error) {
+	num, err := index.GetBytes2Uint64(leaf)
+	if nil != err {
+		return nil, nil, err
+	}
+	indexOfLeaf := int(num)
 
 	var otherLeaf []byte
 	// Chcek if the leaf is on the left side.
